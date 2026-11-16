@@ -3,19 +3,19 @@ import re
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
 
+# Email validation pattern
 EMAIL_PATTERN = re.compile(
     r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}"
 )
 
 
-
-def extract_intro_text(page):
+def extract_intro_data(page):
     """
-    Locate the Intro heading and extract text from its
-    nearest containing card.
+    Locate the Intro section and extract its text
+    and publicly displayed mailto links.
     """
 
-    intro_text = page.locator("body").evaluate("""
+    intro_data = page.locator("body").evaluate("""
         body => {
 
             const elements = Array.from(
@@ -33,28 +33,38 @@ def extract_intro_text(page):
 
                 let current = heading.parentElement;
 
+                // Find the smallest suitable Intro card
                 for (let i = 0; i < 10 && current; i++) {
 
                     const text = current.innerText || "";
 
-                    // Find the smallest suitable Intro card
+                    const mailtoLinks = Array.from(
+                        current.querySelectorAll('a[href^="mailto:"]')
+                    );
+
+                    const hasEmail = (
+                        /[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}/i
+                        .test(text)
+                        || mailtoLinks.length > 0
+                    );
+
                     if (
                         text.length >= 20 &&
-                        text.length <= 1500
+                        text.length <= 1500 &&
+                        hasEmail
                     ) {
-
-                        const emailPattern =
-                            /[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}/i;
-
-                        if (emailPattern.test(text)) {
-                            return text;
-                        }
+                        return {
+                            text: text,
+                            mailto: mailtoLinks.map(
+                                link => link.getAttribute("href")
+                            )
+                        };
                     }
 
                     current = current.parentElement;
                 }
 
-                // Fallback: return a reasonably sized Intro card
+                // Fallback when no email is present
                 current = heading.parentElement;
 
                 for (let i = 0; i < 10 && current; i++) {
@@ -65,7 +75,14 @@ def extract_intro_text(page):
                         text.length >= 20 &&
                         text.length <= 1000
                     ) {
-                        return text;
+                        return {
+                            text: text,
+                            mailto: Array.from(
+                                current.querySelectorAll(
+                                    'a[href^="mailto:"]'
+                                )
+                            ).map(link => link.getAttribute("href"))
+                        };
                     }
 
                     current = current.parentElement;
@@ -76,57 +93,94 @@ def extract_intro_text(page):
         }
     """)
 
-    return intro_text
+    return intro_data
 
 
-def extract_email(text):
-    """Extract unique email addresses from text."""
+def extract_email(intro_data):
+    """
+    Extract unique email addresses from Intro text
+    and mailto links.
+    """
 
-    if not text:
+    if not intro_data:
         return []
 
+    text = intro_data.get("text", "")
+
+    # Extract emails from visible text
     emails = EMAIL_PATTERN.findall(text)
 
-    # Remove duplicates
-    return list(dict.fromkeys(
-        email.strip(".,;:()[]{}<>")
-        for email in emails
-    ))
+    # Extract emails from mailto links
+    for link in intro_data.get("mailto", []):
+
+        if not link:
+            continue
+
+        address = link.replace("mailto:", "", 1)
+        address = address.split("?")[0]
+
+        emails.extend(EMAIL_PATTERN.findall(address))
+
+    # Clean and remove duplicates (case-insensitive)
+    unique_emails = {}
+
+    for email in emails:
+
+        email = email.strip(".,;:()[]{}<>")
+
+        if EMAIL_PATTERN.fullmatch(email):
+            unique_emails[email.lower()] = email
+
+    return list(unique_emails.values())
+
+
+def detect_unavailable_page(body_text):
+    """Check for common Facebook unavailable-page messages."""
+
+    unavailable_phrases = [
+        "this content isn't available",
+        "this page isn't available",
+        "the link you followed may be broken",
+        "the page may have been removed"
+    ]
+
+    lower_text = body_text.lower()
+
+    return any(
+        phrase in lower_text
+        for phrase in unavailable_phrases
+    )
 
 
 
-# def debug_page(page):
-#     """Save diagnostic information about the loaded Facebook page."""
+def detect_login_required(page):
+    """
+    Detect Facebook login redirects and visible login popups.
+    """
 
-#     from pathlib import Path
+    try:
+        current_url = page.url.lower()
 
-#     output_dir = Path("output")
-#     output_dir.mkdir(exist_ok=True)
+        # Check whether Facebook redirected to a login page
+        if "/login" in current_url or "login.php" in current_url:
+            return True
 
-#     # Save screenshot
-#     page.screenshot(
-#         path=str(output_dir / "debug_page.png"),
-#         full_page=True
-#     )
+        # Check for visible login input fields
+        login_inputs = page.locator(
+            'input[name="email"], '
+            'input[name="pass"], '
+            'input[type="password"], '
+            'input[autocomplete="username"]'
+        )
 
-#     # Save visible page text
-#     body_text = page.locator("body").inner_text()
+        for index in range(login_inputs.count()):
+            if login_inputs.nth(index).is_visible():
+                return True
 
-#     with open(
-#         output_dir / "debug_page.txt",
-#         "w",
-#         encoding="utf-8"
-#     ) as file:
-#         file.write(body_text)
+    except Exception:
+        pass
 
-    # Print relevant information
-    print("\n========== PAGE DEBUG ==========")
-    print("URL:", page.url)
-    print("Title:", page.title())
-    print("\nVISIBLE PAGE TEXT:")
-    print(body_text[:6000])
-    print("\n================================")
-
+    return False
 
 
 def scrape_facebook_page(page, url):
@@ -144,45 +198,30 @@ def scrape_facebook_page(page, url):
             timeout=45000
         )
 
-        # Allow visible page content to render
+        # Allow page content to render
         page.wait_for_timeout(4000)
-        #debug_page(page)
 
         body_text = page.locator("body").inner_text(
             timeout=15000
         )
 
-        lower_text = body_text.lower()
-
-        # Detect common login/access restrictions
-        restricted_phrases = [
-            "log in to facebook",
-            "log into facebook",
-            "you must log in",
-            "content isn't available",
-            "this content isn't available",
-            "page isn't available"
-        ]
-
-        if any(
-            phrase in lower_text
-            for phrase in restricted_phrases
-        ):
-            return "", "Error"
+        # Check whether the page is unavailable
+        if detect_unavailable_page(body_text):
+            return "", "Page Unavailable"
 
         # Inspect only the Intro section
-        intro_text = extract_intro_text(page)
-        # print("\n--- DEBUG INFORMATION ---")
-        # print("Page URL:", page.url)
-        # print("Page Title:", page.title())
-        # print("Intro Text:", repr(intro_text))
-        # print("-------------------------\n")
+        intro_data = extract_intro_data(page)
 
-        if not intro_text:
-            print("DEBUG: Intro section was not detected.")
+        # If Intro cannot be accessed, check login requirement
+        if not intro_data:
+
+            if detect_login_required(page):
+                return "", "Login Required"
+
             return "", "Error"
 
-        emails = extract_email(intro_text)
+        # Extract emails
+        emails = extract_email(intro_data)
 
         if emails:
             return "; ".join(emails), "Found"

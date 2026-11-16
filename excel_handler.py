@@ -5,66 +5,87 @@ from pathlib import Path
 
 INPUT_FILE = Path("input/facebook_urls.xlsx")
 OUTPUT_FILE = Path("output/extracted_emails.xlsx")
-MAX_URLS = 1                                        #It is for row limitation
 
 
-def read_facebook_urls():
-    """Read Facebook URLs from the input Excel file."""
+def read_facebook_urls(input_file=INPUT_FILE, max_urls=None):
+    """
+    Read Facebook URLs from Excel.
 
-    if not INPUT_FILE.exists():
+    max_urls=None means process all URLs.
+    """
+
+    input_file = Path(input_file)
+
+    if not input_file.exists():
         raise FileNotFoundError(
-            f"Input file not found: {INPUT_FILE}"
+            f"Input file not found: {input_file}"
         )
 
-    workbook = load_workbook(INPUT_FILE, read_only=True)
+    workbook = load_workbook(input_file, read_only=True)
     sheet = workbook.active
 
-    # Find the Facebook URL column
-    headers = [
-        str(cell.value).strip().lower()
-        if cell.value else ""
-        for cell in sheet[1]
-    ]
+    try:
+        # Find the Facebook URL column
+        headers = [
+            str(cell.value).strip().lower()
+            if cell.value else ""
+            for cell in sheet[1]
+        ]
 
-    if "facebook url" in headers:
-        column_index = headers.index("facebook url") + 1
-        start_row = 2
-    else:
-        # If there is no header, use the first column
-        column_index = 1
-        start_row = 1
+        if "facebook url" in headers:
+            column_index = headers.index("facebook url") + 1
+            start_row = 2
+        else:
+            column_index = 1
+            start_row = 1
 
-    urls = []
+        urls = []
 
-    for row in range(start_row, sheet.max_row + 1):
-        value = sheet.cell(row, column_index).value
+        for row in range(start_row, sheet.max_row + 1):
+            value = sheet.cell(row, column_index).value
 
-        if value:
-            url = str(value).strip()
+            if value:
+                url = str(value).strip()
 
-            if url.startswith(("https://", "http://")):
-                urls.append(url)
+                if url.startswith(("https://", "http://")):
+                    urls.append(url)
 
-    workbook.close()
+    finally:
+        workbook.close()
 
-    # Remove duplicate URLs while preserving order
-    return list(dict.fromkeys(urls))[:MAX_URLS]
+    # Remove duplicates while preserving order
+    urls = list(dict.fromkeys(urls))
+
+    # Apply optional URL limit
+    if max_urls is not None:
+        if max_urls < 1:
+            raise ValueError("URL limit must be at least 1.")
+
+        urls = urls[:max_urls]
+
+    return urls
 
 
-def initialize_output():
+def initialize_output(output_file=OUTPUT_FILE):
     """Create output Excel file with required columns."""
 
-    OUTPUT_FILE.parent.mkdir(
+    output_file = Path(output_file)
+
+    output_file.parent.mkdir(
         parents=True,
         exist_ok=True
     )
 
-    if OUTPUT_FILE.exists():
-        workbook = load_workbook(OUTPUT_FILE)
+    if output_file.exists():
+        workbook = load_workbook(output_file)
         sheet = workbook.active
 
-        if sheet.max_row == 0:
-            sheet.append(["Facebook URL", "Email", "Status"])
+        if sheet.max_row == 1 and sheet["A1"].value is None:
+            sheet.append([
+                "Facebook URL",
+                "Email",
+                "Status"
+            ])
 
     else:
         workbook = Workbook()
@@ -77,34 +98,40 @@ def initialize_output():
             "Status"
         ])
 
-    workbook.save(OUTPUT_FILE)
+    workbook.save(output_file)
     workbook.close()
 
 
-def get_processed_urls():
+def get_processed_urls(output_file=OUTPUT_FILE):
     """Get URLs already processed."""
 
-    if not OUTPUT_FILE.exists():
+    output_file = Path(output_file)
+
+    if not output_file.exists():
         return set()
 
-    workbook = load_workbook(OUTPUT_FILE, read_only=True)
+    workbook = load_workbook(output_file, read_only=True)
     sheet = workbook.active
 
     processed = set()
 
-    for row in sheet.iter_rows(min_row=2, values_only=True):
-        if row[0]:
-            processed.add(row[0])
+    try:
+        for row in sheet.iter_rows(min_row=2, values_only=True):
+            if row[0]:
+                processed.add(row[0])
 
-    workbook.close()
+    finally:
+        workbook.close()
 
     return processed
 
 
-def save_result(url, email, status):
+def save_result(url, email, status, output_file=OUTPUT_FILE):
     """Save one result immediately."""
 
-    workbook = load_workbook(OUTPUT_FILE)
+    output_file = Path(output_file)
+
+    workbook = load_workbook(output_file)
     sheet = workbook.active
 
     sheet.append([
@@ -113,5 +140,5 @@ def save_result(url, email, status):
         status
     ])
 
-    workbook.save(OUTPUT_FILE)
+    workbook.save(output_file)
     workbook.close()
